@@ -1,7 +1,0 @@
-torch>=1.12
-rdkit
-dgl
-numpy
-scikit-learn
-pandas
-matplotlib
