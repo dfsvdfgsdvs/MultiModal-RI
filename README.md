@@ -8,14 +8,6 @@ MultiModal-RI is a deep learning framework that predicts liquid chromatography r
 
 Accurate metabolite annotation in untargeted metabolomics remains challenging due to the extensive chemical space and structural similarity of small molecules. Although liquid chromatography retention indices (RI) provide a stable and reproducible metric for compound identification, their application is limited by the sparse coverage of experimental RI databases. MultiModal-RI addresses this gap by predicting RI directly from molecular structures (SMILES strings), providing an orthogonal annotation dimension to mass spectrometry matching.
 
-### Key Features
-
-- **Dual-modal molecular representation**: 2D molecular graph topology (RBF-KAN GNN) + 1D SMILES sequence (MolBERT)
-- **Bidirectional cross-attention fusion**: Dynamic alignment between graph and sequence modalities
-- **RBF-KAN regressor**: Replaces traditional MLPs with learnable radial basis function activations
-- **SMILES augmentation**: Randomized, non-canonical, kekulized, and isomeric SMILES variants for data augmentation
-- **Dynamic dual-threshold filtering**: Error-scaled RI filtering window for metabolite annotation
-
 ### Performance
 
 | Model | MAE | RMSE | R² | MedAE |
