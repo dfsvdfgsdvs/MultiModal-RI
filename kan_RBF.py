@@ -643,7 +643,7 @@ class MultiModalFusion(nn.Module):
             
             fused = torch.cat([g2b_output, b2g_output], dim=-1)
             fused = self.out_proj(fused)
-            fused = self.layer_norm(0.5*fused + gnn_proj + bert_proj)
+            fused = self.layer_norm(0.25*fused + gnn_proj + bert_proj)
             
             return fused
         
