@@ -652,7 +652,7 @@ class MultiModalRBFKAAGNN(nn.Module):
     def __init__(self, N, dim, layer_hidden, layer_output, vocab_size,
                  bert_dim=256, bert_heads=8, bert_layers=4, bert_ff_dim=1024,
                  num_centers=5, rbf_type='gaussian', heads=1, dropout_rate=0.1,
-                 fusion_type='attention', fusion_heads=4, learn_centers=True, learn_width=True,
+                 fusion_type='cross_attention', fusion_heads=4, learn_centers=True, learn_width=True,
                  max_smiles_length=256):
         super(MultiModalRBFKAAGNN, self).__init__()
 
@@ -697,7 +697,7 @@ class MultiModalRBFKAAGNN(nn.Module):
         
         self.W_output = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(fusion_dim, fusion_dim),
+                RBFKANLinear(fusion_dim, fusion_dim, num_centers=num_centers, rbf_type=rbf_type, scale_rbf=0.5),
                 nn.BatchNorm1d(fusion_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate)
@@ -851,7 +851,7 @@ class MultiModalRBFKAAGNNWithPretrainedBERT(nn.Module):
         
         self.W_output = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(fusion_dim, fusion_dim),
+                RBFKANLinear(fusion_dim, fusion_dim, num_centers=num_centers, rbf_type=rbf_type),
                 nn.BatchNorm1d(fusion_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate)
