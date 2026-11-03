@@ -411,11 +411,11 @@ class SparseRBFKAAGCNLayer(torch.nn.Module):
         return edge_index
 
 
-class ImprovedRBFKAAGNN(torch.nn.Module):
+class ImprovedRBFKAAGCN(torch.nn.Module):
     def __init__(self, N, dim, layer_hidden, layer_output, num_centers=5, 
                  rbf_type='gaussian', heads=4, dropout_rate=0.1,
                  learn_centers=True, learn_width=True):
-        super(ImprovedRBFKAAGNN, self).__init__()
+        super(ImprovedRBFKAAGCN, self).__init__()
         self.embed_fingerprint = nn.Embedding(N, dim)
 
         self.dropout = nn.Dropout(dropout_rate)
@@ -509,6 +509,11 @@ class ImprovedRBFKAAGNN(torch.nn.Module):
             predicted_values = np.concatenate(predicted_values)
             correct_values = np.concatenate(correct_values)
             return Smiles, predicted_values, correct_values
+
+
+KANLinear = RBFKANLinear
+ImprovedKAAGCN = ImprovedRBFKAAGCN
+SparseKAAGCNLayer = SparseRBFKAAGCNLayer
 
 
 class MultiModalFusion(nn.Module):
@@ -648,13 +653,13 @@ class MultiModalFusion(nn.Module):
             return fused
         
 
-class MultiModalRBFKAAGNN(nn.Module):
+class MultiModalRBFKAAGCN(nn.Module):
     def __init__(self, N, dim, layer_hidden, layer_output, vocab_size,
                  bert_dim=256, bert_heads=8, bert_layers=4, bert_ff_dim=1024,
                  num_centers=5, rbf_type='gaussian', heads=1, dropout_rate=0.1,
-                 fusion_type='cross_attention', fusion_heads=4, learn_centers=True, learn_width=True,
+                 fusion_type='attention', fusion_heads=4, learn_centers=True, learn_width=True,
                  max_smiles_length=256):
-        super(MultiModalRBFKAAGNN, self).__init__()
+        super(MultiModalRBFKAAGCN, self).__init__()
 
         self.embed_fingerprint = nn.Embedding(N, dim)
         self.dropout = nn.Dropout(dropout_rate)
@@ -697,7 +702,7 @@ class MultiModalRBFKAAGNN(nn.Module):
         
         self.W_output = nn.ModuleList([
             nn.Sequential(
-                RBFKANLinear(fusion_dim, fusion_dim, num_centers=num_centers, rbf_type=rbf_type, scale_rbf=0.5),
+                nn.Linear(fusion_dim, fusion_dim),
                 nn.BatchNorm1d(fusion_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate)
@@ -796,13 +801,13 @@ class MultiModalRBFKAAGNN(nn.Module):
             return Smiles, predicted_values, correct_values
 
 
-class MultiModalRBFKAAGNNWithPretrainedBERT(nn.Module):
+class MultiModalRBFKAAGCNWithPretrainedBERT(nn.Module):
     def __init__(self, N, dim, layer_hidden, layer_output, 
                  pretrained_model_name='seyonec/ChemBERTa-zinc-base-v1',
                  num_centers=5, rbf_type='gaussian', heads=4, dropout_rate=0.1,
                  fusion_type='attention', learn_centers=True, learn_width=True,
                  freeze_bert=False):
-        super(MultiModalRBFKAAGNNWithPretrainedBERT, self).__init__()
+        super(MultiModalRBFKAAGCNWithPretrainedBERT, self).__init__()
         
         self.embed_fingerprint = nn.Embedding(N, dim)
         self.dropout = nn.Dropout(dropout_rate)
@@ -851,7 +856,7 @@ class MultiModalRBFKAAGNNWithPretrainedBERT(nn.Module):
         
         self.W_output = nn.ModuleList([
             nn.Sequential(
-                RBFKANLinear(fusion_dim, fusion_dim, num_centers=num_centers, rbf_type=rbf_type),
+                nn.Linear(fusion_dim, fusion_dim),
                 nn.BatchNorm1d(fusion_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate)

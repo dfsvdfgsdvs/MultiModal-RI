@@ -212,78 +212,85 @@ class SMILESAugmentor:
         )
 
 
-def create_dataset_with_augmentation(filename, path, dataname, num_augments=3, 
-                                      augmentation_types=None, augment_training=True):
+def create_dataset_augment_after_split(filename, path, dataname, split_ratio=0.9,
+                                       num_augments=3, augmentation_types=None,
+                                       seed=1234):
     """
-    创建带数据增强的数据集
-    
-    Args:
-        filename: 数据文件名
-        path: 数据路径
-        dataname: 数据集名称
-        num_augments: 每个分子的增强数量
-        augmentation_types: 增强类型
-        augment_training: 是否对训练数据进行增强
-    
+    先划分验证集，再仅对训练集做SMILES数据增强
+    （避免同一分子的增强版本同时出现在训练集和验证集中造成数据泄露）
+
     Returns:
-        list: 数据集
+        tuple: (train_dataset, dev_dataset)
     """
     dir_dataset = path
     print(filename)
-    
+
     with open(dir_dataset + filename, 'r') as f:
         _ = f.readline().strip().split()
         data_original = f.read().strip().split('\n')
-    
+
     data_original = [data for data in data_original if '.' not in data.split()[0]]
-    
+
     smiles_list = [data.strip().split()[0] for data in data_original]
     property_list = [float(data.strip().split()[1]) for data in data_original]
-    
-    if augment_training:
-        print(f"Applying SMILES augmentation (num_augments={num_augments})...")
-        augmented_smiles, augmented_properties = augment_smiles_batch(
-            smiles_list, property_list, num_augments, augmentation_types
-        )
-        print(f"Original size: {len(smiles_list)}, Augmented size: {len(augmented_smiles)}")
-    else:
-        augmented_smiles, augmented_properties = smiles_list, property_list
-    
-    init_smiles_tokenizer(augmented_smiles)
-    
-    dataset = []
-    for smiles, prop in zip(augmented_smiles, augmented_properties):
-        mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
-        if mol is None:
-            continue
-            
-        atoms = create_atoms(mol, atom_dict)
-        molecular_size = len(atoms)
-        i_jbond_dict = create_ijbonddict(mol, bond_dict)
-        fingerprints = extract_fingerprints(radius, atoms, i_jbond_dict,
-                                            fingerprint_dict, edge_dict)
-        adjacency = np.float32((Chem.GetAdjacencyMatrix(mol)))
-        
-        input_ids, attention_mask = tokenize_smiles(smiles)
-        input_ids = torch.LongTensor(input_ids).to(device)
-        attention_mask = torch.LongTensor(attention_mask).to(device)
-        
-        fingerprints = torch.LongTensor(fingerprints).to(device)
-        adjacency = torch.FloatTensor(adjacency).to(device)
-        prop_tensor = torch.FloatTensor([[float(prop)]]).to(device)
-        
-        dataset.append((smiles, fingerprints, adjacency, molecular_size, 
+
+    # 用全部原始smiles建立tokenizer，确保训练集/验证集词汇都被覆盖
+    init_smiles_tokenizer(smiles_list)
+
+    # 先在smiles层面划分训练集/验证集
+    np.random.seed(seed)
+    indices = np.arange(len(smiles_list))
+    np.random.shuffle(indices)
+    n_train = int(split_ratio * len(smiles_list))
+    train_idx = indices[:n_train]
+    dev_idx = indices[n_train:]
+
+    train_smiles = [smiles_list[i] for i in train_idx]
+    train_props = [property_list[i] for i in train_idx]
+    dev_smiles = [smiles_list[i] for i in dev_idx]
+    dev_props = [property_list[i] for i in dev_idx]
+
+    # 仅对训练集做数据增强
+    print(f"Applying SMILES augmentation to training set (num_augments={num_augments})...")
+    aug_train_smiles, aug_train_props = augment_smiles_batch(
+        train_smiles, train_props, num_augments, augmentation_types
+    )
+    print(f"Train: {len(train_smiles)} -> {len(aug_train_smiles)} (augmented)")
+    print(f"Dev: {len(dev_smiles)} (no augmentation)")
+
+    def _build(smiles_props):
+        ds = []
+        for smiles, prop in smiles_props:
+            mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
+            if mol is None:
+                continue
+            atoms = create_atoms(mol, atom_dict)
+            molecular_size = len(atoms)
+            i_jbond_dict = create_ijbonddict(mol, bond_dict)
+            fingerprints = extract_fingerprints(radius, atoms, i_jbond_dict,
+                                                fingerprint_dict, edge_dict)
+            adjacency = np.float32((Chem.GetAdjacencyMatrix(mol)))
+            input_ids, attention_mask = tokenize_smiles(smiles)
+            input_ids = torch.LongTensor(input_ids).to(device)
+            attention_mask = torch.LongTensor(attention_mask).to(device)
+            fingerprints = torch.LongTensor(fingerprints).to(device)
+            adjacency = torch.FloatTensor(adjacency).to(device)
+            prop_tensor = torch.FloatTensor([[float(prop)]]).to(device)
+            ds.append((smiles, fingerprints, adjacency, molecular_size,
                        prop_tensor, input_ids, attention_mask))
-    
-    dir_dataset = path
+        return ds
+
+    train_dataset = _build(zip(aug_train_smiles, aug_train_props))
+    dev_dataset = _build(zip(dev_smiles, dev_props))
+
     dump_dictionary(fingerprint_dict, dir_dataset + dataname + '-fingerprint_dict.pickle')
     dump_dictionary(atom_dict, dir_dataset + dataname + '-atom_dict.pickle')
     dump_dictionary(bond_dict, dir_dataset + dataname + '-bond_dict.pickle')
     dump_dictionary(edge_dict, dir_dataset + dataname + '-edge_dict.pickle')
     save_tokenizer(dir_dataset, dataname)
-    
-    return dataset
-        
+
+    return train_dataset, dev_dataset
+
 if torch.cuda.is_available():
     device = torch.device('cuda')
     print('The code uses a GPU!')
@@ -404,7 +411,7 @@ def create_dataset(filename,path,dataname):
     return dataset
 	
 def create_dataset_randomsplit(x,y,path,dataname):
-    dir_input = path + 'inhouse-'
+    dir_input = path + 'SMRT-'
     with open(dir_input + 'atom_dict.pickle', 'rb') as f:
         c=pickle.load(f)
         for k in c.keys():
@@ -428,7 +435,7 @@ def create_dataset_randomsplit(x,y,path,dataname):
             fingerprint_dict.get(k)
             fingerprint_dict[k]=c[k]
     
-    load_tokenizer(path, 'inhouse')
+    load_tokenizer(path, 'SMRT')
     
     dataset = []  
     for i in range(len(x)):
@@ -464,7 +471,7 @@ def create_dataset_randomsplit(x,y,path,dataname):
     return dataset
 	
 def create_dataset_kfold(x,y,path,dataname):
-    dir_input =path+'inhouse-'
+    dir_input =path+'SMRT-'
     with open(dir_input + 'atom_dict.pickle', 'rb') as f:
         c=pickle.load(f)
         for k in c.keys():
@@ -488,7 +495,7 @@ def create_dataset_kfold(x,y,path,dataname):
             fingerprint_dict.get(k)
             fingerprint_dict[k]=c[k]
     
-    load_tokenizer(path, 'inhouse')
+    load_tokenizer(path, 'SMRT')
     
     dataset = []
     for i in range(len(x)):
@@ -523,7 +530,7 @@ def create_dataset_kfold(x,y,path,dataname):
 
 
 def transferlearning_dataset_predict(x,path):
-    dir_input = path+'inhouse-'
+    dir_input = path+'SMRT-'
     with open(dir_input + 'atom_dict.pickle', 'rb') as f:
         c=pickle.load(f)
         for k in c.keys():
