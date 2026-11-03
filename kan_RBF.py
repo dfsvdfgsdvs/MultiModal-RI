@@ -411,111 +411,6 @@ class SparseRBFKAAGCNLayer(torch.nn.Module):
         return edge_index
 
 
-class ImprovedRBFKAAGCN(torch.nn.Module):
-    def __init__(self, N, dim, layer_hidden, layer_output, num_centers=5, 
-                 rbf_type='gaussian', heads=4, dropout_rate=0.1,
-                 learn_centers=True, learn_width=True):
-        super(ImprovedRBFKAAGCN, self).__init__()
-        self.embed_fingerprint = nn.Embedding(N, dim)
-
-        self.dropout = nn.Dropout(dropout_rate)
-
-        # RBF KAGCN
-        self.rbf_kaa_layers = nn.ModuleList()
-        for i in range(layer_hidden):
-            in_dim = dim if i == 0 else (dim * heads if heads > 1 else dim)
-            out_dim = dim
-            self.rbf_kaa_layers.append(
-                SparseRBFKAAGCNLayer(in_dim, out_dim, num_centers, rbf_type, heads)
-            )
-
-        output_dim = dim * heads if heads > 1 else dim
-        self.W_output = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(output_dim, output_dim),
-                nn.BatchNorm1d(output_dim), 
-                nn.ReLU(),
-                nn.Dropout(dropout_rate)
-            ) for _ in range(layer_output)
-        ])
-        self.W_property = nn.Linear(output_dim, 1)
-
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            torch.nn.init.xavier_uniform_(module.weight)
-            if module.bias is not None:
-                module.bias.data.zero_()
-
-    def pad(self, matrices, pad_value):
-        """Pad the list of matrices for batch processing."""
-        shapes = [m.shape for m in matrices]
-        M, N = sum([s[0] for s in shapes]), sum([s[1] for s in shapes])
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        zeros = torch.FloatTensor(np.zeros((M, N))).to(device)
-        pad_matrices = pad_value + zeros
-        i, j = 0, 0
-        for k, matrix in enumerate(matrices):
-            m, n = shapes[k]
-            pad_matrices[i:i + m, j:j + n] = matrix
-            i += m
-            j += n
-        return pad_matrices
-
-    def sum(self, vectors, axis):
-        """Sum vectors along the given axis."""
-        sum_vectors = [torch.sum(v, 0) for v in torch.split(vectors, axis)]
-        return torch.stack(sum_vectors)
-
-    def gnn(self, inputs):
-        Smiles, fingerprints, adjacencies, molecular_sizes = inputs
-        fingerprints = torch.cat(fingerprints)
-        adjacencies = self.pad(adjacencies, 0)
-
-        fingerprint_vectors = self.embed_fingerprint(fingerprints)
-        fingerprint_vectors = self.dropout(fingerprint_vectors)
-
-        for i, layer in enumerate(self.rbf_kaa_layers):
-            fingerprint_vectors = layer.update(adjacencies, fingerprint_vectors, i)
-            if i < len(self.rbf_kaa_layers) - 1: 
-                fingerprint_vectors = self.dropout(fingerprint_vectors)
-
-        molecular_vectors = self.sum(fingerprint_vectors, molecular_sizes)
-        return Smiles, molecular_vectors
-
-    def mlp(self, vectors):
-        for layer in self.W_output:
-            vectors = layer(vectors)
-        outputs = self.W_property(vectors)
-        return outputs
-
-    def forward_regressor(self, data_batch, train):
-        """Forward pass - regressor"""
-        inputs = data_batch[:-1]
-        correct_values = torch.cat(data_batch[-1])
-
-        if train:
-            Smiles, molecular_vectors = self.gnn(inputs)
-            predicted_values = self.mlp(molecular_vectors)
-            loss = F.mse_loss(predicted_values, correct_values)
-            return loss
-        else:
-            with torch.no_grad():
-                Smiles, molecular_vectors = self.gnn(inputs)
-                predicted_values = self.mlp(molecular_vectors)
-            predicted_values = predicted_values.to('cpu').data.numpy()
-            correct_values = correct_values.to('cpu').data.numpy()
-            predicted_values = np.concatenate(predicted_values)
-            correct_values = np.concatenate(correct_values)
-            return Smiles, predicted_values, correct_values
-
-
-KANLinear = RBFKANLinear
-ImprovedKAAGCN = ImprovedRBFKAAGCN
-SparseKAAGCNLayer = SparseRBFKAAGCNLayer
-
-
 class MultiModalFusion(nn.Module):
     def __init__(self, gnn_dim, bert_dim, fusion_dim, fusion_type='concat', num_heads=4):
         super(MultiModalFusion, self).__init__()
@@ -702,7 +597,7 @@ class MultiModalRBFKAAGCN(nn.Module):
         
         self.W_output = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(fusion_dim, fusion_dim),
+                RBFKANLinear(fusion_dim, fusion_dim, num_centers=num_centers, rbf_type=rbf_type, scale_rbf=0.5),
                 nn.BatchNorm1d(fusion_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout_rate)
