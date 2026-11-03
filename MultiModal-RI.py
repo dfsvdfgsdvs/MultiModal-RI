@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import preprocess as pp
 import pickle
-from kan_RBF import MultiModalRBFKAAGNN, MultiModalRBFKAAGNNWithPretrainedBERT
+from kan_RBF import MultiModalRBFKAAGCN, MultiModalRBFKAAGCNWithPretrainedBERT
 
 
 class Trainer(object):
@@ -115,7 +115,7 @@ if __name__ == "__main__":
     num_augments = 4
     augmentation_types = ['random', 'canonical', 'kekulize', 'isomeric']
     
-    path = './data/'
+    path = '/data2/wangxujie/MRN/MultiModal-RI-RT/data/'
     dataname = 'in-house'
     
     if torch.cuda.is_available():
@@ -127,15 +127,20 @@ if __name__ == "__main__":
     
     if use_augmentation:
         print(f'Using SMILES augmentation with {num_augments} augmentations per molecule')
-        dataset_train = pp.create_dataset_with_augmentation(
-            'train_set_stratified.txt', path, dataname, 
-            num_augments=num_augments, 
+        # Split by molecular identity first, then apply SMILES augmentation exclusively to the
+        # training subset, so that augmented copies of a molecule never appear in the validation set
+        dataset_train, dataset_dev = pp.create_dataset_augment_after_split(
+            'train_set_stratified.txt', path, dataname,
+            split_ratio=0.9,
+            num_augments=num_augments,
             augmentation_types=augmentation_types
         )
     else:
         dataset_train = pp.create_dataset('train_set_stratified.txt', path, dataname)
-    dataset_train, dataset_dev = split_dataset(dataset_train, 0.9)
+        dataset_train, dataset_dev = split_dataset(dataset_train, 0.9)
     dataset_test = pp.create_dataset('test_set_stratified.txt', path, dataname)
+    # The independent test set is loaded separately and held out from all model-development
+    # decisions (training, hyperparameter tuning, and checkpoint selection)
 
     lr, lr_decay = map(float, [lr, lr_decay])
     if torch.cuda.is_available():
@@ -155,12 +160,13 @@ if __name__ == "__main__":
     print('Creating a multi-modal model.')
     
     torch.manual_seed(123)
+    # Fix random seeds so that the stratified split and training run are deterministic
     
     vocab_size = len(pp.smiles_tokenizer) if pp.smiles_tokenizer else 1000
     
     if use_pretrained_bert:
         print(f'Using pretrained BERT model: {pretrained_model_name}')
-        model = MultiModalRBFKAAGNNWithPretrainedBERT(
+        model = MultiModalRBFKAAGCNWithPretrainedBERT(
             N, dim, layer_hidden, layer_output,
             pretrained_model_name=pretrained_model_name,
             num_centers=6,
@@ -172,7 +178,7 @@ if __name__ == "__main__":
         ).to(device)
     else:
         print('Using custom MolBERT model')
-        model = MultiModalRBFKAAGNN(
+        model = MultiModalRBFKAAGCN(
             N, dim, layer_hidden, layer_output, vocab_size,
             bert_dim=bert_dim,
             bert_heads=bert_heads,
@@ -194,7 +200,7 @@ if __name__ == "__main__":
     file_test_result = path + 'test_prediction_multimodal' + '.txt'
     file_predictions = path + 'train_prediction_multimodal' + '.txt'
     file_model = path + 'inhouse_model_multimodal' + '.h5'
-    result = 'Epoch\tTime(sec)\tLoss_train\tMAE_train\tMAE_dev\tMAE_test'
+    result = 'Epoch\tTime(sec)\tLoss_train\tMAE_train\tMAE_dev'
     with open(file_MAEs, 'w') as f:
         f.write(result + '\n')
 
@@ -211,11 +217,11 @@ if __name__ == "__main__":
         if epoch % decay_interval == 0:
             trainer.optimizer.param_groups[0]['lr'] *= lr_decay
         model.train()
+        # Parameter updates use only the training set (dataset_train)
         loss_train = trainer.train(dataset_train)
         model.eval()
         MAE_train, predictions_train = tester.test_regressor(dataset_train)
         MAE_dev = tester.test_regressor(dataset_dev)[0]
-        MAE_test = tester.test_regressor(dataset_test)[0]
 
         time = timeit.default_timer() - start
 
@@ -229,8 +235,10 @@ if __name__ == "__main__":
             print(result)
 
         results = '\t'.join(map(str, [epoch, time, loss_train, MAE_train,
-                                      MAE_dev, MAE_test]))
+                                      MAE_dev]))
         tester.save_MAEs(results, file_MAEs)
+        # The best checkpoint is selected exclusively by validation MAE (MAE_dev);
+        # the independent test set plays no role in model selection
         if MAE_dev <= MAE_best:
             MAE_best = MAE_dev
             tester.save_model(model, file_model)
@@ -248,7 +256,6 @@ if __name__ == "__main__":
     loss = pd.read_table(file_MAEs)
     plt.plot(loss['MAE_train'], color='r', label='MAE of train set')
     plt.plot(loss['MAE_dev'], color='b', label='MAE of validation set')
-    plt.plot(loss['MAE_test'], color='y', label='MAE of test set')
     plt.ylabel('Loss')
     plt.xlabel('Epoch')
     plt.legend()
@@ -257,6 +264,8 @@ if __name__ == "__main__":
     
     predictions_train = tester.test_regressor(dataset_train)[1]
     tester.save_predictions(predictions_train, file_predictions)
+    # The test set is evaluated only after training is complete; it is never used for
+    # parameter updates or checkpoint selection
     predictions_test = tester.test_regressor(dataset_test)[1]
     tester.save_predictions(predictions_test, file_test_result)
     
@@ -284,6 +293,7 @@ if __name__ == "__main__":
 
     print('-' * 100)
     print('Loading the best model...')
+    # Reload the best checkpoint, which was selected solely by validation MAE during training
     model.load_state_dict(torch.load(file_model))
     model.eval()
 
