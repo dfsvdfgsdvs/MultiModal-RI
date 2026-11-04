@@ -14,6 +14,32 @@ radius=1
 smiles_tokenizer = None
 max_smiles_length = 256
 
+# Feature dictionaries (atom/bond/fingerprint/edge) are populated exclusively
+# from the training subset and then frozen; validation and test data are encoded
+# with these frozen dictionaries (unseen patterns map to an <unk> index) and
+# never extend the vocabularies.
+_feature_dicts_frozen = False
+_unk_indices = {}
+
+
+def freeze_feature_dicts():
+    global _feature_dicts_frozen
+    for name, d in (('atom', atom_dict), ('bond', bond_dict),
+                    ('fingerprint', fingerprint_dict), ('edge', edge_dict)):
+        if '<unk>' not in d:
+            d['<unk>'] = len(d)
+        _unk_indices[name] = d['<unk>']
+    _feature_dicts_frozen = True
+
+
+def _dict_index(d, key, name):
+    if key in d:
+        return d[key]
+    if _feature_dicts_frozen:
+        return _unk_indices[name]
+    d[key] = len(d)
+    return d[key]
+
 def dump_dictionary(dictionary, filename):
     with open(filename, 'wb') as f:
         pickle.dump(dict(dictionary), f)
@@ -71,6 +97,19 @@ def load_tokenizer(path, dataname):
         return smiles_tokenizer
     except FileNotFoundError:
         return None
+
+
+def molecule_identity(smiles):
+    """Return a canonical molecular identity used to group chemically identical records.
+
+    Different SMILES spellings of the same molecule share the same canonical SMILES,
+    so grouping by this key prevents one molecule from being split across subsets.
+    Unparsable SMILES fall back to the raw string so they are never merged with valid records.
+    """
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return smiles
+    return Chem.MolToSmiles(mol, canonical=True)
 
 
 def augment_smiles(smiles, num_augments=5, augmentation_types=None):
@@ -216,8 +255,11 @@ def create_dataset_augment_after_split(filename, path, dataname, split_ratio=0.9
                                        num_augments=3, augmentation_types=None,
                                        seed=1234):
     """
-    先划分验证集，再仅对训练集做SMILES数据增强
-    （避免同一分子的增强版本同时出现在训练集和验证集中造成数据泄露）
+    Split by canonical molecular identity first, then apply SMILES augmentation
+    exclusively to the training subset, so that augmented copies of a molecule
+    never appear in the validation set. The tokenizer and feature dictionaries
+    are built from the training subset only and frozen before the validation
+    subset is encoded.
 
     Returns:
         tuple: (train_dataset, dev_dataset)
@@ -234,29 +276,39 @@ def create_dataset_augment_after_split(filename, path, dataname, split_ratio=0.9
     smiles_list = [data.strip().split()[0] for data in data_original]
     property_list = [float(data.strip().split()[1]) for data in data_original]
 
-    # 用全部原始smiles建立tokenizer，确保训练集/验证集词汇都被覆盖
-    init_smiles_tokenizer(smiles_list)
+    # Split by canonical molecular identity: rows describing the same molecule
+    # (possibly written as different SMILES) are kept on the same side of the split
+    canonical_keys = [molecule_identity(smiles) for smiles in smiles_list]
 
-    # 先在smiles层面划分训练集/验证集
+    groups = defaultdict(list)
+    for i, key in enumerate(canonical_keys):
+        groups[key].append(i)
+
     np.random.seed(seed)
-    indices = np.arange(len(smiles_list))
-    np.random.shuffle(indices)
-    n_train = int(split_ratio * len(smiles_list))
-    train_idx = indices[:n_train]
-    dev_idx = indices[n_train:]
+    group_keys = list(groups.keys())
+    np.random.shuffle(group_keys)
+    n_train_groups = int(split_ratio * len(group_keys))
+    train_keys = set(group_keys[:n_train_groups])
+
+    train_idx = [i for key in group_keys if key in train_keys for i in groups[key]]
+    dev_idx = [i for key in group_keys if key not in train_keys for i in groups[key]]
 
     train_smiles = [smiles_list[i] for i in train_idx]
     train_props = [property_list[i] for i in train_idx]
     dev_smiles = [smiles_list[i] for i in dev_idx]
     dev_props = [property_list[i] for i in dev_idx]
 
-    # 仅对训练集做数据增强
+    # Apply SMILES augmentation exclusively to the training subset
     print(f"Applying SMILES augmentation to training set (num_augments={num_augments})...")
     aug_train_smiles, aug_train_props = augment_smiles_batch(
         train_smiles, train_props, num_augments, augmentation_types
     )
     print(f"Train: {len(train_smiles)} -> {len(aug_train_smiles)} (augmented)")
     print(f"Dev: {len(dev_smiles)} (no augmentation)")
+
+    # Build the tokenizer exclusively from the training subset; validation data
+    # is encoded with this frozen vocabulary (unseen tokens map to <UNK>)
+    init_smiles_tokenizer(aug_train_smiles)
 
     def _build(smiles_props):
         ds = []
@@ -280,7 +332,10 @@ def create_dataset_augment_after_split(filename, path, dataname, split_ratio=0.9
                        prop_tensor, input_ids, attention_mask))
         return ds
 
+    # Build the training subset first so the feature dictionaries see training
+    # data only, then freeze them before encoding the validation subset
     train_dataset = _build(zip(aug_train_smiles, aug_train_props))
+    freeze_feature_dicts()
     dev_dataset = _build(zip(dev_smiles, dev_props))
 
     dump_dictionary(fingerprint_dict, dir_dataset + dataname + '-fingerprint_dict.pickle')
@@ -307,7 +362,7 @@ def create_atoms(mol, atom_dict):
     for a in mol.GetAromaticAtoms():
         i = a.GetIdx()
         atoms[i] = (atoms[i], 'aromatic')
-    atoms = [atom_dict[a] for a in atoms]
+    atoms = [_dict_index(atom_dict, a, 'atom') for a in atoms]
     return np.array(atoms)
 
 
@@ -319,7 +374,7 @@ def create_ijbonddict(mol, bond_dict):
     i_jbond_dict = defaultdict(lambda: [])
     for b in mol.GetBonds():
         i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
-        bond = bond_dict[str(b.GetBondType())]
+        bond = _dict_index(bond_dict, str(b.GetBondType()), 'bond')
         i_jbond_dict[i].append((j, bond))
         i_jbond_dict[j].append((i, bond))
     return i_jbond_dict
@@ -332,7 +387,7 @@ def extract_fingerprints(radius, atoms, i_jbond_dict,
     """
 
     if (len(atoms) == 1) or (radius == 0):
-        nodes = [fingerprint_dict[a] for a in atoms]
+        nodes = [_dict_index(fingerprint_dict, a, 'fingerprint') for a in atoms]
 
     else:
         nodes = atoms
@@ -347,7 +402,7 @@ def extract_fingerprints(radius, atoms, i_jbond_dict,
             for i, j_edge in i_jedge_dict.items():
                 neighbors = [(nodes[j], edge) for j, edge in j_edge]
                 fingerprint = (nodes[i], tuple(sorted(neighbors)))
-                nodes_.append(fingerprint_dict[fingerprint])
+                nodes_.append(_dict_index(fingerprint_dict, fingerprint, 'fingerprint'))
 
             """Also update each edge ID considering
             its two nodes on both sides.
@@ -356,7 +411,7 @@ def extract_fingerprints(radius, atoms, i_jbond_dict,
             for i, j_edge in i_jedge_dict.items():
                 for j, edge in j_edge:
                     both_side = tuple(sorted((nodes[i], nodes[j])))
-                    edge = edge_dict[(both_side, edge)]
+                    edge = _dict_index(edge_dict, (both_side, edge), 'edge')
                     i_jedge_dict_[i].append((j, edge))
 
             nodes = nodes_
@@ -364,7 +419,7 @@ def extract_fingerprints(radius, atoms, i_jbond_dict,
 
     return np.array(nodes)
 
-def create_dataset(filename,path,dataname):
+def create_dataset(filename, path, dataname, build_tokenizer=True):
     dir_dataset = path
     print(filename)
     """Load a dataset."""
@@ -375,10 +430,20 @@ def create_dataset(filename,path,dataname):
         """Exclude the data contains '.' in its smiles."""
     data_original = [data for data in data_original
                         if '.' not in data.split()[0]]
-    
-    smiles_list = [data.strip().split()[0] for data in data_original]
-    init_smiles_tokenizer(smiles_list)
-    
+
+    # build_tokenizer=False: reuse the frozen tokenizer built from the training
+    # subset and never rebuild it from this file (unseen tokens map to <UNK>)
+    if build_tokenizer:
+        smiles_list = [data.strip().split()[0] for data in data_original]
+        init_smiles_tokenizer(smiles_list)
+    elif smiles_tokenizer is None:
+        raise ValueError(
+            "Tokenizer is not initialized. Load the training set first or set build_tokenizer=True."
+        )
+
+    # Tokenizer and feature dictionaries are frozen from the training subset;
+    # encoding this file never extends them (unseen tokens/patterns map to
+    # <UNK>/<unk> indices)
     dataset = []
     for data in data_original:
 
@@ -410,6 +475,19 @@ def create_dataset(filename,path,dataname):
     save_tokenizer(dir_dataset, dataname)
     return dataset
 	
+def check_identity_overlap(dataset_a, dataset_b, name_a='dataset_a', name_b='dataset_b'):
+    """Report whether any canonical molecular identity appears in both datasets."""
+    def _keys(dataset):
+        return {molecule_identity(row[0]) for row in dataset}
+
+    overlap = _keys(dataset_a) & _keys(dataset_b)
+    if overlap:
+        print(f'WARNING: {len(overlap)} molecular identities appear in both {name_a} and {name_b}!')
+    else:
+        print(f'Check passed: no molecular identity is shared between {name_a} and {name_b}.')
+    return overlap
+
+
 def create_dataset_randomsplit(x,y,path,dataname):
     dir_input = path + 'SMRT-'
     with open(dir_input + 'atom_dict.pickle', 'rb') as f:

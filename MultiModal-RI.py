@@ -78,13 +78,6 @@ class Tester(object):
         torch.save(model.state_dict(), filename)
 
 
-def split_dataset(dataset, ratio):
-    np.random.seed(1234) 
-    np.random.shuffle(dataset)
-    n = int(ratio * len(dataset))
-    return dataset[:n], dataset[n:]
-
-
 def dump_dictionary(dictionary, filename):
     with open(filename, 'wb') as f:
         pickle.dump(dict(dictionary), f)
@@ -136,11 +129,16 @@ if __name__ == "__main__":
             augmentation_types=augmentation_types
         )
     else:
-        dataset_train = pp.create_dataset('train_set_stratified.txt', path, dataname)
-        dataset_train, dataset_dev = split_dataset(dataset_train, 0.9)
-    dataset_test = pp.create_dataset('test_set_stratified.txt', path, dataname)
-    # The independent test set is loaded separately and held out from all model-development
-    # decisions (training, hyperparameter tuning, and checkpoint selection)
+        # Same identity-based split and training-only tokenizer as above, without augmentation
+        dataset_train, dataset_dev = pp.create_dataset_augment_after_split(
+            'train_set_stratified.txt', path, dataname,
+            split_ratio=0.9,
+            num_augments=1,
+            augmentation_types=[]
+        )
+    # Verify that no molecular identity is shared between the training and
+    # validation subsets
+    pp.check_identity_overlap(dataset_train, dataset_dev, 'train', 'dev')
 
     lr, lr_decay = map(float, [lr, lr_decay])
     if torch.cuda.is_available():
@@ -155,13 +153,13 @@ if __name__ == "__main__":
     print('The preprocess has finished!')
     print('# of training data samples:', len(dataset_train))
     print('# of development data samples:', len(dataset_dev))
-    print('# of test data samples:', len(dataset_test))
     print('-' * 100)
     print('Creating a multi-modal model.')
     
     torch.manual_seed(123)
     # Fix random seeds so that the stratified split and training run are deterministic
     
+    # Vocabulary size is fixed by the tokenizer built from the training subset only
     vocab_size = len(pp.smiles_tokenizer) if pp.smiles_tokenizer else 1000
     
     if use_pretrained_bert:
@@ -262,10 +260,20 @@ if __name__ == "__main__":
     plt.savefig(path + 'loss_multimodal.tif', dpi=300)
     plt.show()
     
+    # The independent test set is loaded only after training is complete, encoded
+    # with the frozen tokenizer/feature dictionaries built from the training
+    # subset; it is used solely for final evaluation and plays no role in
+    # training, hyperparameter tuning, or checkpoint selection
+    dataset_test = pp.create_dataset('test_set_stratified.txt', path, dataname,
+                                     build_tokenizer=False)
+    print('# of test data samples:', len(dataset_test))
+    # Verify that no molecular identity is shared between the outer
+    # training/validation pool and the independent test set
+    pp.check_identity_overlap(dataset_train + dataset_dev, dataset_test,
+                              'train+dev', 'test')
+
     predictions_train = tester.test_regressor(dataset_train)[1]
     tester.save_predictions(predictions_train, file_predictions)
-    # The test set is evaluated only after training is complete; it is never used for
-    # parameter updates or checkpoint selection
     predictions_test = tester.test_regressor(dataset_test)[1]
     tester.save_predictions(predictions_test, file_test_result)
     
