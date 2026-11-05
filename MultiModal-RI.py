@@ -108,7 +108,7 @@ if __name__ == "__main__":
     num_augments = 4
     augmentation_types = ['random', 'canonical', 'kekulize', 'isomeric']
     
-    path = '/data2/wangxujie/MRN/MultiModal-RI-RT/data/'
+    path = '/data2/wangxujie/MultiModal-RI/data/'
     dataname = 'in-house'
     
     if torch.cuda.is_available():
@@ -123,7 +123,7 @@ if __name__ == "__main__":
         # Split by molecular identity first, then apply SMILES augmentation exclusively to the
         # training subset, so that augmented copies of a molecule never appear in the validation set
         dataset_train, dataset_dev = pp.create_dataset_augment_after_split(
-            'train_set_stratified.txt', path, dataname,
+            'train_set.txt', path, dataname,
             split_ratio=0.9,
             num_augments=num_augments,
             augmentation_types=augmentation_types
@@ -131,7 +131,7 @@ if __name__ == "__main__":
     else:
         # Same identity-based split and training-only tokenizer as above, without augmentation
         dataset_train, dataset_dev = pp.create_dataset_augment_after_split(
-            'train_set_stratified.txt', path, dataname,
+            'train_set.txt', path, dataname,
             split_ratio=0.9,
             num_augments=1,
             augmentation_types=[]
@@ -157,7 +157,7 @@ if __name__ == "__main__":
     print('Creating a multi-modal model.')
     
     torch.manual_seed(123)
-    # Fix random seeds so that the stratified split and training run are deterministic
+    # Fix random seeds so that the random split and training run are deterministic
     
     # Vocabulary size is fixed by the tokenizer built from the training subset only
     vocab_size = len(pp.smiles_tokenizer) if pp.smiles_tokenizer else 1000
@@ -264,7 +264,7 @@ if __name__ == "__main__":
     # with the frozen tokenizer/feature dictionaries built from the training
     # subset; it is used solely for final evaluation and plays no role in
     # training, hyperparameter tuning, or checkpoint selection
-    dataset_test = pp.create_dataset('test_set_stratified.txt', path, dataname,
+    dataset_test = pp.create_dataset('test_set.txt', path, dataname,
                                      build_tokenizer=False)
     print('# of test data samples:', len(dataset_test))
     # Verify that no molecular identity is shared between the outer
